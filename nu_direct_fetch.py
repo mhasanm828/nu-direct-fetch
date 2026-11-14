@@ -2,53 +2,68 @@
 """
 nu_direct_fetch.py — NU Honours 2025-26 DIRECT fetch (Termux / PC)
 ==================================================================
-Hasan-এর দুইটা মূল API (_nuresult.php + _nuAdmit.php) যেই NU সার্ভার
-কল করে, এই স্ক্রিপ্ট সেই একই কল সরাসরি নিজের ফোন/PC থেকে করে —
-মাঝখানে hasan.bro.bd লাগে না। তাই Hostinger-এর PHP পুলের বাধা নেই,
-আর একসাথে অনেক worker চালানো যায়।
+Version 2.0 FINAL — 14 Nov 2026.
 
-আউটপুট _nuCombined.php v2-র JSON-এর মতোই একদম একই ফরম্যাট
+This script calls the same NU server endpoints that Hasan's two main
+APIs (_nuresult.php + _nuAdmit.php) call, directly from the phone/PC —
+no hasan.bro.bd in the middle. So there is no Hostinger PHP-pool limit,
+and many workers can run at once.
+
+The output has exactly the same format as the _nuCombined.php v2 JSON
 (appid, name, roll, dob, father, mother, gender, ssc, hsc, choices,
-status, allocated, group, collegeCode, ... ) — তাই সাইটের DB-তে
-আপলোড করতে কোনো বদল লাগবে না।
+status, allocated, group, collegeCode, ... ) — so it uploads to the
+site's database with no changes.
 
-সেভ করার উপায় (--save):
-  both    ফোনে (local .jsonl) + সার্ভারে (save.php) — ডিফল্ট
-  local   শুধু ফোনে — সার্ভারে কিছু পাঠাবে না
-  server  শুধু সার্ভারে — ফোনে ফাইল রাখবে না
+Save modes (--save):
+  both    phone (local .jsonl) + server (save.php) — default
+  local   phone only — sends nothing to the server
+  server  server only — keeps no file on the phone
 
-যা করে:
-  - app55.nu.edu.bd-তে সরাসরি POST করে রেজাল্ট + অ্যাডমিট ডেটা আনে
-  - complete রেকর্ড সেভ করে (ফোনে / সার্ভারে / দুই জায়গায়)
-  - অসম্পূর্ণ রেকর্ড ৩ বার retry করে, তারপরও না হলে partial হিসেবে সেভ
-  - খালি/Unknown ID আলাদা করে লগ করে
-  - আগে সেভ করা ID আগেই বাদ দেয় (ফোনের ফাইল + সার্ভারের saved-ids)
-  - Ctrl+C চাপলে বা ২০০০টা পরপর খালি ID পেলে থেমে progress সেভ করে;
-    আবার একই কমান্ড চালালে সেখান থেকেই শুরু হয়।
+What it does:
+  - POSTs directly to app55.nu.edu.bd for result + admit data
+  - saves complete records (phone / server / both)
+  - retries incomplete records 3 times, then saves them as partial
+  - logs empty/Unknown IDs separately
+  - skips already-saved IDs up front (phone files + server saved-ids)
+  - Ctrl+C, or 2000 consecutive empty IDs, stops and saves progress;
+    running the same command again resumes from there.
 
-শুধু Python 3 লাগে, আর কিছু না (stdlib only — pip install লাগে না)।
+Only Python 3 is needed, nothing else (stdlib only — no pip install).
 
-Termux-এ চালানো:
-  pkg install python          (python না থাকলে; থাকলে লাগবে না)
-  termux-wake-lock            (ফোন ঘুমালে Termux যাতে না মরে)
+WHAT CHANGED IN v2.0 (14 Nov 2026):
+  - All messages are now in English.
+  - Live animated progress line (spinner): shows saved / partial /
+    dup / empty / failed + speed, updating in place. Use --no-anim
+    to turn the animation off (also auto-off when output is piped).
+  - Startup status panel: every part shows [ENABLED] or [DISABLED],
+    so you can see at a glance what is on or off — e.g. if the
+    server's saved-ID list cannot be fetched, the skip filter shows
+    [DISABLED] and already-saved IDs will be re-checked.
+  - No change to fetching, saving, file names or record format —
+    your local files (direct_*.jsonl, direct_progress_*.json)
+    keep working exactly as before.
+
+Run in Termux:
+  pkg install python          (only if python is missing)
+  termux-wake-lock            (keeps Termux alive when the phone sleeps)
   python3 nu_direct_fetch.py --group science --workers 5
   python3 nu_direct_fetch.py --group humanities --workers 5
   python3 nu_direct_fetch.py --group business --workers 5
-  (একেক গ্রুপের জন্য আলাদা Termux session/tab খুলে চালান।
-   থামাতে Ctrl+C। ফোন চার্জে লাগিয়ে রাখাই ভালো।)
+  (Open a separate Termux session/tab for each group.
+   Stop with Ctrl+C. Keep the phone on charge.)
 
-PC-তেও একইভাবে চলে:
+Same on a PC:
   python3 nu_direct_fetch.py --group science --workers 10
 
-একটা ID পরীক্ষা করতে (সেভ না করে):
+Test one ID (no saving):
   python3 nu_direct_fetch.py --test 3042425
 
-শুধু ফোনে সেভ করতে:
+Save to phone only:
   python3 nu_direct_fetch.py --group science --save local --workers 5
 
-সতর্কতা: workers বেশি মানেই সবসময় দ্রুত নয় — আসল সীমা NU-র সার্ভার।
-৫ দিয়ে শুরু করুন; গতি + partial দেখে ১০ পর্যন্ত বাড়ান।
-partial/failed বাড়তে থাকলে workers কমান।
+Note: more workers is not always faster — the real limit is NU's
+server. Start with 5; raise to 10 if speed + partial look good.
+Lower the workers if partial/failed keeps growing.
 """
 
 import argparse
@@ -63,31 +78,58 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# ---- NU endpoints (Hasan-এর _nuresult.php / _nuAdmit.php-এর মতোই) ----
+# ---- NU endpoints (same as _nuresult.php / _nuAdmit.php) ----
 RESULT_URL = "http://app55.nu.edu.bd/nu-web/fetchAdmissionTestResultInformation"
 ADMIT_URL = "http://app55.nu.edu.bd/nu-web/fetchAdmitCardInformation"
 RESULT_REFERER = "http://app55.nu.edu.bd/nu-web/admissionTestResultQueryForm"
 ADMIT_REFERER = "http://app55.nu.edu.bd/nu-web/admitCardVerificationHome"
 
-# ---- সার্ভার সেভ (ব্রাউজার টুলের save.php-র মতোই) ----
+# ---- Server save (same as the browser tool's save.php) ----
 BASE = "https://hasan.bro.bd"
 SAVE = BASE + "/NU/bulk-honours/save.php"
 COLLEGES_MAP_URL = BASE + "/_apis/colleges-map.json"
 
-STOP_AFTER_INVALID = 2000   # পরপর এতগুলো খালি ID পেলে ব্লক শেষ ধরে থামবে
-CHUNK = 100                 # একবারে এতগুলো ID submit করা হয়
-SKIP_FLUSH = 50             # এতগুলো skipped জমলে সার্ভারে পাঠানো হয়
-NU_TIMEOUT = 30             # NU-র একেকটা কলে সর্বোচ্চ সেকেন্ড
+STOP_AFTER_INVALID = 2000   # stop after this many consecutive empty IDs (end of block)
+CHUNK = 100                 # IDs submitted per chunk
+SKIP_FLUSH = 50             # skipped IDs buffered before sending to server
+NU_TIMEOUT = 30             # max seconds per NU call
 
 GROUP_STARTS = {"science": 3002005, "humanities": 5002001, "business": 7002001}
 
+# ---- Animated progress line (spinner) ----
+ANIM_ENABLED = True
+_SPIN_FRAMES = "|/-\\"
+_spin = {"i": 0, "len": 0}
+
+
+def spin(text):
+    """Rewrite one animated progress line in place (spinner + counts)."""
+    if not ANIM_ENABLED:
+        return
+    frame = _SPIN_FRAMES[_spin["i"] % len(_SPIN_FRAMES)]
+    _spin["i"] += 1
+    line = "\r" + frame + " " + text
+    pad = " " * max(0, _spin["len"] - len(line))
+    sys.stdout.write(line + pad)
+    sys.stdout.flush()
+    _spin["len"] = len(line)
+
+
+def clear_spin():
+    """Erase the spinner line so a log line prints cleanly."""
+    if _spin["len"]:
+        sys.stdout.write("\r" + " " * _spin["len"] + "\r")
+        sys.stdout.flush()
+        _spin["len"] = 0
+
 
 def log(msg):
+    clear_spin()
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 # ----------------------------------------------------------------------
-# HTML parsing — PHP দুইটার regex-এর মতোই
+# HTML parsing — same regexes as the two PHP files
 # ----------------------------------------------------------------------
 
 def clean_text(text):
@@ -99,14 +141,14 @@ def clean_text(text):
 
 
 def get_field(html_text, field):
-    """Result পেজ:  'Application ID :</font> VALUE </div>' ধরনের ফিল্ড।"""
+    """Result page: 'Application ID :</font> VALUE </div>' style fields."""
     m = re.search(re.escape(field) + r"\s*:</font>\s*(.*?)</div>",
                   html_text, re.I | re.S)
     return clean_text(m.group(1)) if m else None
 
 
 def parse_result(html_text):
-    """_nuresult.php-এর মতো রেজাল্ট পার্স করে।"""
+    """Parse the result page, like _nuresult.php."""
     app_id = get_field(html_text, "Application ID")
     roll = get_field(html_text, "Admission Test Roll No")
     name = get_field(html_text, "Applicant Name")
@@ -148,21 +190,21 @@ def parse_result(html_text):
 
 
 def extract_value(html_text, label):
-    """Admit পেজ:  '<strong>Label</strong>: <span>VALUE</span>' ধরনের ফিল্ড।"""
+    """Admit page: '<strong>Label</strong>: <span>VALUE</span>' style fields."""
     m = re.search(r"<strong>\s*" + re.escape(label) + r"\s*</strong>:\s*<span[^>]*>(.*?)</span>",
                   html_text, re.I)
     return clean_text(m.group(1)) if m else ""
 
 
 def table_value(table_html, label):
-    """SSC/HSC টেবিল:  '<td>Label</td><td><span>VALUE</span>' ধরনের সেল।"""
+    """SSC/HSC table: '<td>Label</td><td><span>VALUE</span>' style cells."""
     m = re.search(r"<td>\s*" + re.escape(label) + r"\s*</td>\s*<td>\s*<span[^>]*>(.*?)</span>",
                   table_html, re.I | re.S)
     return clean_text(m.group(1)) if m else ""
 
 
 def parse_admit(html_text, roll):
-    """_nuAdmit.php-এর মতো অ্যাডমিট পার্স করে।"""
+    """Parse the admit page, like _nuAdmit.php."""
     html_text = re.sub(r"\s+", " ", html_text or "")
 
     m = re.search(r"SSC/Equivalent Exam(.*?)</table>", html_text, re.I | re.S)
@@ -202,11 +244,11 @@ def parse_admit(html_text, roll):
 
 
 # ----------------------------------------------------------------------
-# NU-তে সরাসরি POST
+# Direct POST to NU
 # ----------------------------------------------------------------------
 
 def nu_post(url, referer, appid, timeout=NU_TIMEOUT):
-    """একটা NU endpoint-এ form POST করে HTML ফেরত দেয়।"""
+    """POST one form to an NU endpoint and return the HTML."""
     data = urllib.parse.urlencode({"admissionRoll": str(appid)}).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={
         "X-Requested-With": "XMLHttpRequest",
@@ -220,7 +262,7 @@ def nu_post(url, referer, appid, timeout=NU_TIMEOUT):
 
 
 # ----------------------------------------------------------------------
-# কলেজ ম্যাপ (collegeCode বের করতে)
+# College map (to find collegeCode)
 # ----------------------------------------------------------------------
 
 def norm_name(s):
@@ -235,7 +277,7 @@ _college_index = None
 
 
 def college_code_for(college_name):
-    """আবেদন করা কলেজের নাম থেকে code বের করে (colleges-map.json)।"""
+    """Find the code for the applied college's name (colleges-map.json)."""
     global _college_index
     if not college_name:
         return ""
@@ -274,7 +316,7 @@ def edu_str(e):
 
 
 def merge_record(admit, result, roll):
-    """দুইটা API-র ডেটা মিলিয়ে _nuCombined v2-র মতো একটাই রেকর্ড বানায়।"""
+    """Merge the two APIs' data into one _nuCombined v2-style record."""
     admit = admit or {}
     result = result or {}
     appid = str(admit.get("application_id") or result.get("application_id") or roll)
@@ -342,7 +384,7 @@ def is_complete(d):
 
 
 def fetch_one(appid, timeout=NU_TIMEOUT):
-    """একটা ID-র জন্য দুইটা NU কল করে মার্জ করা রেকর্ড ফেরত দেয়।"""
+    """Two NU calls for one ID; returns the merged record."""
     result_html = nu_post(RESULT_URL, RESULT_REFERER, appid, timeout)
     admit_html = nu_post(ADMIT_URL, ADMIT_REFERER, appid, timeout)
     return merge_record(parse_admit(admit_html, appid),
@@ -370,7 +412,7 @@ def fetch_with_retry(appid, retries, retry_delay=1.0):
 
 
 # ----------------------------------------------------------------------
-# সার্ভার সেভ (save.php) + ফোনে সেভ (local .jsonl)
+# Server save (save.php) + phone save (local .jsonl)
 # ----------------------------------------------------------------------
 
 def post_json(url, payload, timeout=15):
@@ -383,8 +425,8 @@ def post_json(url, payload, timeout=15):
 
 
 def save_record_server(rec):
-    """save.php-তে একটা রেকর্ড পাঠায়। 'saved' / 'duplicate' / None।"""
-    for _ in range(2):  # ১ বার retry
+    """Send one record to save.php. Returns 'saved' / 'duplicate' / None."""
+    for _ in range(2):  # 1 retry
         try:
             res = post_json(SAVE, rec)
             if isinstance(res, dict) and res.get("status"):
@@ -395,20 +437,22 @@ def save_record_server(rec):
 
 
 def load_saved_ids_server():
-    """v3 save.php থেকে আগে সেভ করা সব appid আনে। না পেলে খালি set।"""
+    """Fetch all already-saved appids from save.php v3.
+    Returns (ids, ok): ok is False when the server could not be reached,
+    in which case the caller must run WITHOUT the server skip-filter."""
     try:
         req = urllib.request.Request(SAVE + "?action=saved-ids",
                                     headers={"User-Agent": "nu-direct/1.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
             text = r.read().decode("utf-8", "replace")
-        return {line.strip() for line in text.splitlines() if line.strip()}
+        return ({line.strip() for line in text.splitlines() if line.strip()}, True)
     except Exception as e:
-        log(f"সতর্কতা: সার্ভারের আগে-সেভ-করা ID-র লিস্ট আনা যায়নি ({e}) — ফিল্টার ছাড়াই চলছে।")
-        return set()
+        log(f"WARNING: could not fetch the server's already-saved ID list ({e}) — running WITHOUT the server skip-filter.")
+        return (set(), False)
 
 
 def post_skipped_server(appids):
-    """খালি ID-গুলো সার্ভারে লগ করে (v3 থাকলে)। ভুল হলে চুপচাপ বাদ।"""
+    """Log empty IDs on the server (v3 only). Silently ignored on error."""
     if not appids:
         return
     try:
@@ -418,7 +462,7 @@ def post_skipped_server(appids):
 
 
 def load_local_ids(path):
-    """ফোনের .jsonl ফাইল থেকে আগে সেভ করা appid-গুলো পড়ে।"""
+    """Read already-saved appids from a phone .jsonl file."""
     ids = set()
     if os.path.exists(path):
         try:
@@ -435,7 +479,7 @@ def load_local_ids(path):
 
 
 def append_local(path, rec):
-    """ফোনের .jsonl ফাইলে একটা রেকর্ড যোগ করে।"""
+    """Append one record to a phone .jsonl file."""
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -464,6 +508,8 @@ class Runner:
         self.t0 = time.time()
         self.processed = 0
         self.next_id = self.start
+        self._resumed = False
+        self._last_spin = 0.0
 
     def load_progress(self):
         if self.args.fresh or not os.path.exists(self.prog_file):
@@ -486,7 +532,7 @@ class Runner:
                            "counts": self.counts,
                            "updated": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
         except Exception as e:
-            log(f"progress লেখা যায়নি: {e}")
+            log(f"Could not write progress: {e}")
 
     def backup_unsaved(self, rec):
         try:
@@ -501,7 +547,7 @@ class Runner:
             self.skipped_batch = []
 
     def store_record(self, rec, kind):
-        """রেকর্ডটা সেভ করে। returns: 'saved' / 'duplicate' / None (fail)।"""
+        """Save the record. Returns 'saved' / 'duplicate' / None (failed)."""
         saved_anywhere = False
         dup_everywhere = True
         if self.use_local:
@@ -518,7 +564,7 @@ class Runner:
                 saved_anywhere = True
                 dup_everywhere = False
             elif res == "duplicate":
-                pass  # সার্ভারে ডুপ্লিকেট — অন্য জায়গায় সেভ হয়েছে কিনা দেখো
+                pass  # duplicate on server — check if saved elsewhere
             else:
                 dup_everywhere = False
         if saved_anywhere:
@@ -538,53 +584,100 @@ class Runner:
                 return ("saved" if kind == "ok" else "partial", appid)
             if res == "duplicate":
                 return ("dup", appid)
-            self.backup_unsaved(rec)  # কোথাও সেভ হয়নি — লোকাল ব্যাকআপে রাখা হলো
+            self.backup_unsaved(rec)  # saved nowhere — kept in the local backup
             return ("failed", appid)
         if kind == "skip":
             return ("skip", appid)
         return ("fail", appid)
 
+    def live_line(self, current_id=None):
+        """One-line live status for the spinner."""
+        el = max(1, time.time() - self.t0)
+        rate = self.processed / el * 60
+        c = self.counts
+        tail = f" | ID {current_id}" if current_id else ""
+        return (f"{self.processed}/{self.limit} | saved {c['saved']} | "
+                f"partial {c['partial']} | dup {c['dup']} | empty {c['skipped']} | "
+                f"failed {c['failed']} | {rate:.0f}/min{tail}")
+
     def report(self):
         el = max(1, time.time() - self.t0)
         rate = self.processed / el * 60
         c = self.counts
-        log(f"{self.processed}/{self.limit} | সেভ {c['saved']} | partial {c['partial']} | "
-            f"dup {c['dup']} | খালি {c['skipped']} | ব্যর্থ {c['failed']} | "
-            f"আগে-সেভ-বাদ {c['already']} | {rate:.1f}/মিনিট")
+        log(f"{self.processed}/{self.limit} | saved {c['saved']} | partial {c['partial']} | "
+            f"dup {c['dup']} | empty {c['skipped']} | failed {c['failed']} | "
+            f"pre-saved skipped {c['already']} | {rate:.1f}/min")
+
+    def status_panel(self, total, already_n, server_ok):
+        """Startup panel: every part shows [ENABLED] or [DISABLED]."""
+        bar = "=" * 60
+        if self.use_local:
+            local_s = f"[ENABLED]  direct_{self.group}.jsonl"
+        else:
+            local_s = f"[DISABLED] (--save {self.save_mode})"
+        if self.use_server:
+            if server_ok:
+                server_s = "[ENABLED]  save.php"
+            else:
+                server_s = "[DISABLED] server unreachable — already-saved IDs will be re-checked"
+        else:
+            server_s = f"[DISABLED] (--save {self.save_mode})"
+        if already_n > 0:
+            skip_s = f"[ACTIVE]   {already_n} already-saved IDs preloaded (will be skipped)"
+        elif self.use_server and not server_ok:
+            skip_s = "[DISABLED] server list unreachable — running WITHOUT the server filter"
+        else:
+            skip_s = "[DISABLED] no already-saved IDs found"
+        if self._resumed:
+            resume_s = f"[RESUMED]  from {self.next_id} (progress file)"
+        else:
+            resume_s = f"[FRESH]    start at {self.next_id}"
+        log(bar)
+        log(f"NU DIRECT FETCH — v2.0 FINAL | group {self.group.upper()}")
+        log(f"Range      : {self.next_id} - {self.next_id + total - 1} ({total} IDs to scan)")
+        log(f"Workers    : {self.workers} | Save mode: {self.save_mode}")
+        log(f"Local save : {local_s}")
+        log(f"Server save: {server_s}")
+        log(f"Skip filter: {skip_s}")
+        log(f"Resume     : {resume_s}")
+        log(bar)
 
     def run(self):
         resumed = self.load_progress()
         if resumed:
             self.next_id = resumed
-            log(f"আগের জায়গা থেকে চালাচ্ছি: {self.next_id} (progress ফাইল থেকে)")
+            self._resumed = True
+            log(f"Resuming from {self.next_id} (progress file)")
         end = self.start + self.limit
         ids = list(range(self.next_id, end))
         if not ids:
-            log("করার মতো ID নেই — range শেষ।")
+            log("No IDs to do — range is finished.")
             return
 
         already = set()
+        server_ok = True
         if self.use_local:
             already |= load_local_ids(self.local_file)
             already |= load_local_ids(self.partial_file)
             if already:
-                log(f"ফোনের ফাইলে আগে সেভ করা {len(already)}টা ID পাওয়া গেছে।")
+                log(f"Found {len(already)} already-saved IDs in the phone files.")
         if self.use_server:
-            server_ids = load_saved_ids_server()
+            server_ids, server_ok = load_saved_ids_server()
             if server_ids:
-                log(f"সার্ভারে আগে সেভ করা {len(server_ids)}টা ID পাওয়া গেছে।")
+                log(f"Found {len(server_ids)} already-saved IDs on the server.")
             already |= server_ids
         if already:
             before = len(ids)
             ids = [i for i in ids if str(i) not in already]
             self.counts["already"] = before - len(ids)
-            log(f"আগে সেভ করা {self.counts['already']}টা ID বাদ দেওয়া হলো।")
+            log(f"Skipped {self.counts['already']} already-saved IDs.")
         self.limit = len(ids)
         if not ids:
-            log("সব ID-ই আগে সেভ করা — করার মতো কিছু নেই।")
+            log("All IDs already saved — nothing to do.")
             return
-        log(f"গ্রুপ {self.group}: {len(ids)}টা ID স্ক্যান হবে "
-            f"({ids[0]}–{ids[-1]}), workers={self.workers}, save={self.save_mode}")
+        log(f"Group {self.group}: will scan {len(ids)} IDs "
+            f"({ids[0]}-{ids[-1]}), workers={self.workers}, save={self.save_mode}")
+        self.status_panel(len(ids), len(already), server_ok)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as ex:
             try:
@@ -615,7 +708,7 @@ class Runner:
                             if len(self.skipped_batch) >= SKIP_FLUSH:
                                 self.flush_skipped()
                             if self.consec_skipped >= STOP_AFTER_INVALID:
-                                log("২০০০টা পরপর খালি ID — ব্লক শেষ মনে হচ্ছে, থামানো হলো।")
+                                log("2000 consecutive empty IDs — end of block suspected, stopping.")
                                 self.stop = True
                                 for f in futs:
                                     f.cancel()
@@ -623,6 +716,9 @@ class Runner:
                         else:
                             self.counts["failed"] += 1
                             self.consec_skipped = 0
+                        if time.time() - self._last_spin >= 0.2:
+                            self._last_spin = time.time()
+                            spin(self.live_line(appid))
                         if self.processed % 50 == 0:
                             self.report()
                     done_upto = chunk[-1] + 1
@@ -633,60 +729,68 @@ class Runner:
                     if self.stop:
                         break
             except KeyboardInterrupt:
-                log("থামানো হচ্ছে (Ctrl+C) — progress সেভ করা হচ্ছে…")
+                log("Stopping (Ctrl+C) — saving progress...")
                 self.stop = True
         self.flush_skipped()
         self.write_progress(self.next_id)
+        clear_spin()
         self.report()
-        log(f"শেষ। পরের শুরু: {self.next_id} — আবার চালাতে একই কমান্ড দিন।")
+        log(f"Done. Next start: {self.next_id} — run the same command again to continue.")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="NU Honours direct fetch (Termux/PC)")
+    ap = argparse.ArgumentParser(description="NU Honours direct fetch (Termux/PC) — v2.0 FINAL")
     ap.add_argument("--group", choices=list(GROUP_STARTS), default="science",
                     help="science / humanities / business")
     ap.add_argument("--start", type=int, default=None,
                     help="Start ID (default: science 3002005, humanities 5002001, business 7002001)")
     ap.add_argument("--limit", type=int, default=5000,
-                    help="কয়টা ID স্ক্যান করবে (default 5000)")
+                    help="How many IDs to scan (default 5000)")
     ap.add_argument("--workers", type=int, default=5,
-                    help="একসাথে কয়টা request (default 5; 1-20)")
+                    help="Parallel requests (default 5; 1-20)")
     ap.add_argument("--delay", type=float, default=0,
-                    help="প্রতি request-এর মাঝে সেকেন্ড (default 0)")
+                    help="Seconds between requests (default 0)")
     ap.add_argument("--retries", type=int, default=3,
-                    help="অসম্পূর্ণ রেকর্ডে retry (default 3)")
+                    help="Retries for incomplete records (default 3)")
     ap.add_argument("--save", choices=["local", "server", "both"], default="both",
-                    help="local=শুধু ফোনে, server=শুধু সার্ভারে, both=দুই জায়গায় (default both)")
+                    help="local=phone only, server=server only, both=both places (default both)")
     ap.add_argument("--fresh", action="store_true",
-                    help="progress ফাইল উপেক্ষা করে --start থেকে শুরু করবে")
+                    help="Ignore the progress file and start from --start")
     ap.add_argument("--dry-run", action="store_true",
-                    help="কিছু fetch করবে না — শুধু পরিকল্পনাটা দেখাবে")
+                    help="Fetch nothing — just show the plan")
     ap.add_argument("--test", type=int, default=None, metavar="APPID",
-                    help="একটা ID fetch করে JSON দেখাবে, সেভ করবে না")
+                    help="Fetch one ID and show its JSON, without saving")
+    ap.add_argument("--no-anim", action="store_true",
+                    help="Turn off the animated progress line")
     args = ap.parse_args()
     if args.start is None:
         args.start = GROUP_STARTS[args.group]
     args.workers = max(1, min(20, args.workers))
     args.limit = max(1, args.limit)
 
+    global ANIM_ENABLED
+    ANIM_ENABLED = (not args.no_anim) and sys.stdout.isatty()
+
     if args.test is not None:
         try:
             rec = fetch_one(args.test)
         except Exception as e:
-            log(f"fetch ব্যর্থ: {e}")
+            log(f"Fetch failed: {e}")
             sys.exit(1)
         print(json.dumps(rec, ensure_ascii=False, indent=2))
         log(f"valid={is_valid(rec)} complete={is_complete(rec)}")
         return
 
     if args.dry_run:
-        log(f"DRY RUN — গ্রুপ {args.group}: {args.limit}টা ID, "
-            f"{args.start}–{args.start + args.limit - 1}, workers={args.workers}, save={args.save}")
+        log(f"DRY RUN — group {args.group}: {args.limit} IDs, "
+            f"{args.start}-{args.start + args.limit - 1}, workers={args.workers}, save={args.save}")
         n_local = len(load_local_ids(f"direct_{args.group}.jsonl"))
-        log(f"ফোনের ফাইলে আগে সেভ করা: {n_local}টা")
+        log(f"Already saved on phone: {n_local} IDs")
         if args.save in ("server", "both"):
-            log(f"সার্ভারে আগে সেভ করা: {len(load_saved_ids_server())}টা")
-        log("কিছু fetch করা হয়নি। চালাতে --dry-run বাদ দিন।")
+            sids, ok = load_saved_ids_server()
+            log(f"Already saved on server: {len(sids)} IDs"
+                + ("" if ok else " (list fetch FAILED — skip filter would be OFF)"))
+        log("Nothing fetched. Run without --dry-run to start.")
         return
 
     Runner(args).run()
